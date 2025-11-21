@@ -89,6 +89,15 @@ def run_game(ventana, clock, resources):
                     last_play['gol'] = now
             except Exception:
                 pass
+            
+            if score_left >= 5 or score_right >= 5:
+                winner = "Jugador 1" if score_left > score_right else "Jugador 2"
+                fin = font.render(f"{winner} gana!", True, Blanco)
+                ventana.blit(fin, (Tamano[0]//2 - fin.get_width()//2, 250))
+                pygame.display.flip()
+                pygame.time.wait(2000)
+                game_over = True
+
 
             # reset pelota al centro
             Pelota_X = 400
@@ -121,8 +130,17 @@ def run_game(ventana, clock, resources):
                 if sounds.get('gol') and now - last_play['gol'] > COOLDOWN_MS:
                     sounds['gol'].play()
                     last_play['gol'] = now
+                    
             except Exception:
                 pass
+            if score_left >= 5 or score_right >= 5:
+                winner = "Jugador 1" if score_left > score_right else "Jugador 2"
+                fin = font.render(f"{winner} gana!", True, Blanco)
+                ventana.blit(fin, (Tamano[0]//2 - fin.get_width()//2, 250))
+                pygame.display.flip()
+                pygame.time.wait(2000)
+                game_over = True
+
 
             Pelota_X = 400
             Pelota_Y = 300
