@@ -1,8 +1,3 @@
-# ==============================
-#  ASTEROIDS - Juego en Python
-#  Documentado sin modificar nada
-# ==============================
-
 import sys, os
 import pygame
 from pygame import Vector2
