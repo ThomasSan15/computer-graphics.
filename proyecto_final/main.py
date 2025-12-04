@@ -2,6 +2,10 @@ import sys, os
 import pygame
 from pygame import Vector2
 import random
+import cv2
+import mediapipe as mp
+import numpy as np
+import math
 
 pygame.init()  # Inicializa pygame
 
@@ -382,10 +386,37 @@ player = Player((SCREENWIDTH//2, SCREENHEIGHT//2))
 
 playerBullets = []      # Lista de balas activas
 asteroidObjects = []    # Asteroides en juego
+# Disparo automático: intervalo entre balas (ms)
+shot_interval_ms = 220
+last_shot_time = 0
 
 # ==============================
 #      BUCLE PRINCIPAL
 # ==============================
+
+# -----------------------------
+# Inicialización control por mano
+# -----------------------------
+use_hand_control = False
+cap = None
+hands_detector = None
+try:
+    cap = cv2.VideoCapture(0)
+    mp_hands = mp.solutions.hands
+    hands_detector = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.6)
+    mp_draw = mp.solutions.drawing_utils
+    use_hand_control = True
+    print('Hand control initialized')
+    # Parámetros de suavizado para reducir temblor
+    hand_pos_alpha = 0.35  # mayor = sigue más rápido
+    hand_dir_alpha = 0.5
+    last_hand_pos = Vector2(player.pos)
+    last_hand_dir = Vector2(player.direction)
+    # Corrección de signo para la rotación (si la rotación se siente invertida)
+    # Se inicializa neutro; se ajustará automáticamente según la mano detectada.
+    hand_rotation_flip = 1
+except Exception as e:
+    print('Hand control not available:', e)
 
 RUNGAME = True
 while RUNGAME:
@@ -395,9 +426,98 @@ while RUNGAME:
         check_asteroidCount_increase_stage()  # Cambia etapa si no quedan asteroides
 
         # -------------------------
+        # Lectura de cámara y control por mano (si está disponible)
+        # -------------------------
+        if use_hand_control and cap is not None and hands_detector is not None:
+            ret, frame = cap.read()
+            if ret:
+                frame = cv2.flip(frame, 1)
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = hands_detector.process(rgb_frame)
+
+                if results.multi_hand_landmarks:
+                    # Usamos la primera mano detectada
+                    hand_landmarks = results.multi_hand_landmarks[0]
+                    lm = hand_landmarks.landmark
+
+                    # --- POSICIÓN: usar punta del pulgar (landmark 4) ---
+                    thumb_tip = lm[4]
+                    measured_x = thumb_tip.x * SCREENWIDTH
+                    measured_y = thumb_tip.y * SCREENHEIGHT
+                    measured_pos = Vector2(measured_x, measured_y)
+
+                    # Suavizar posición (exponential smoothing)
+                    last_hand_pos = last_hand_pos * (1.0 - hand_pos_alpha) + measured_pos * hand_pos_alpha
+                    player.pos = Vector2(last_hand_pos)
+                    player.imgRect.x = int(player.pos[0] - player.width//2)
+                    player.imgRect.y = int(player.pos[1] - player.height//2)
+
+                    # Determinar automáticamente si hay que invertir la rotación
+                    # usando la clasificación de mano que devuelve MediaPipe.
+                    if hasattr(results, 'multi_handedness') and results.multi_handedness:
+                        try:
+                            handedness_label = results.multi_handedness[0].classification[0].label
+                            # Ajuste heurístico: para la 'Right' hand invertimos el signo
+                            # (esto corrige la inversión causada por la vista espejo en la mayoría de webcams)
+                            if handedness_label == 'Right':
+                                hand_rotation_flip = -1
+                            else:
+                                hand_rotation_flip = 1
+                        except Exception:
+                            pass
+
+                    # --- ROTACIÓN: usar vector wrist (0) -> thumb_tip (4) ---
+                    wrist = lm[0]
+                    vx = thumb_tip.x - wrist.x
+                    vy = thumb_tip.y - wrist.y
+                    # Convertir a coordenadas del juego (y hacia arriba)
+                    measured_dir = Vector2(vx, -vy)
+                    if measured_dir.length() > 1e-6:
+                        # Calculamos ángulo medido
+                        measured_angle = math.atan2(measured_dir.y, measured_dir.x)
+
+                        # Invertimos el sentido de rotación (problema reportado)
+                        corrected_angle = -measured_angle
+
+                        # Suavizar ángulo con interpolación polar
+                        try:
+                            last_angle = math.atan2(last_hand_dir.y, last_hand_dir.x)
+                        except Exception:
+                            last_angle = corrected_angle
+
+                        # Interpolación angular segura (evita saltos en -pi/pi)
+                        def lerp_angle(a, b, t):
+                            diff = (b - a + math.pi) % (2 * math.pi) - math.pi
+                            return a + diff * t
+
+                        mixed_angle = lerp_angle(last_angle, corrected_angle, hand_dir_alpha)
+
+                        # Actualizar vectores
+                        new_dir = Vector2(math.cos(mixed_angle), math.sin(mixed_angle))
+                        last_hand_dir = Vector2(new_dir)
+                        player.direction = Vector2(new_dir)
+
+                # Opcional: dibujar ventana de cámara con landmarks para debug
+                # mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                # cv2.imshow('Hand Camera', frame)
+                # cv2.waitKey(1)
+
+        # -------------------------
         # Movimiento de jugador
         # -------------------------
         player.move()
+
+        # -------------------------
+        # Disparo automático continuo (sin gesto)
+        # -------------------------
+        now = pygame.time.get_ticks()
+        if now - last_shot_time >= shot_interval_ms:
+            playerBullets.append(Bullet(player.pos, player.direction))
+            try:
+                shootSound.play()
+            except Exception:
+                pass
+            last_shot_time = now
 
         # -------------------------
         # Movimiento de Balas
@@ -418,7 +538,7 @@ while RUNGAME:
 
             # Colisión bala ↔ asteroide
             for index, bullet in enumerate(playerBullets):
-                if bullet.bulletRect.colliderect(asteroidObject.imgRect):
+                if hasattr(bullet, 'bulletRect') and bullet.bulletRect.colliderect(asteroidObject.imgRect):
                     asteroidObject.health -= 1
                     SCORE += asteroidObject.score
 
@@ -471,6 +591,14 @@ while RUNGAME:
                 playerBullets.append(Bullet(player.pos, player.direction))
                 shootSound.play()
 
+            # Invertir rotación de mano (toggle)
+            if event.key == pygame.K_r:
+                try:
+                    hand_rotation_flip *= -1
+                    print(f'hand_rotation_flip = {hand_rotation_flip}')
+                except NameError:
+                    pass
+
             # Reiniciar tras Game Over
             if GAMEOVER and event.key == pygame.K_TAB:
                 resetAfterLosingALife()
@@ -503,6 +631,17 @@ while RUNGAME:
     # Dibuja todo
     gameWindowUpdating()
     CLOCK.tick(60)  # Limitación FPS
+
+# Limpieza recursos de cámara / MediaPipe si se activó control por mano
+if use_hand_control:
+    try:
+        if hands_detector is not None:
+            hands_detector.close()
+        if cap is not None:
+            cap.release()
+        cv2.destroyAllWindows()
+    except Exception:
+        pass
 
 pygame.quit()
 sys.exit()
